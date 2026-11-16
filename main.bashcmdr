@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Configures only the current shell. It never writes bootstrap files or Go projects.
+_go_info(){ command -v __bashcmdr_info >/dev/null && __bashcmdr_info "$*" || printf '%s\n' "$*"; }
+_go_ok(){ command -v __bashcmdr_success >/dev/null && __bashcmdr_success "$*" || printf '%s\n' "$*"; }
+_go_err(){ command -v __bashcmdr_error >/dev/null && __bashcmdr_error "$*" || printf '%s\n' "$*" >&2; }
+_go_list_has(){ case ":$1:" in *":$2:"*) return 0;; *) return 1;; esac; }
+_go_has(){ _go_list_has "${PATH-}" "$1"; }
+_go_mutable(){
+    local declaration
+    if declaration=$(declare -p "$1" 2>/dev/null); then
+        case "$declaration" in 'declare -- '*|'declare -x '*) return 0;; esac
+        _go_err "Go context requires a writable scalar: $1"; return 1
+    fi
+    return 0
+}
+_go_add(){
+    [[ -d $1 ]] || return 0
+    _go_has "$1" && return 0
+    PATH="${PATH:+$PATH:}$1"
+    if ! _go_list_has "${BASHCMDR_GO_ADDED_PATHS-}" "$1"; then
+        BASHCMDR_GO_ADDED_PATHS="${BASHCMDR_GO_ADDED_PATHS:+$BASHCMDR_GO_ADDED_PATHS:}$1"
+    fi
+    return 0
+}
+_go_remove(){
+    local value=$1
+    # Remove one owned occurrence, preserving unrelated empty/glob-like fields.
+    case "${PATH-}" in
+        "$value") PATH=${PATH#"$value"} ;;
+        "$value":*) PATH=${PATH#"$value":} ;;
+        *:"$value":*) PATH=${PATH/:"$value":/:} ;;
+        *:"$value") PATH=${PATH%:"$value"} ;;
+    esac
+    return 0
+}
+_go_native_path(){ [[ $1 == [A-Za-z]:[/\\]* || $1 == \\\\* ]]; }
+_go_shell_path(){
+    local value=$1 converted
+    if _go_native_path "$value"; then
+        if ! command -v cygpath >/dev/null 2>&1; then
+            _go_err 'Native Windows Go paths require cygpath in this Bash environment'; return 1
+        fi
+        if ! converted=$(cygpath -u -- "$value") || [[ -z $converted || $converted != /* ]]; then
+            _go_err 'Cannot convert native Go path to a Bash path'; return 1
+        fi
+        value=$converted
+    fi
+    if [[ $value == *:* || $value == *$'\n'* || $value == *$'\r'* ]]; then
+        _go_err 'Go path cannot be represented as one Bash PATH element'; return 1
+    fi
+    printf '%s\n' "$value"
+}
+_go_cmd(){
+    local candidate root
+    # The external command already effective on PATH has precedence. Optional
+    # bootstrap locations are used only when no external PATH Go is available.
+    if candidate=$(builtin type -P go 2>/dev/null) && [[ -n $candidate ]]; then
+        printf '%s\n' "$candidate"; return 0
+    fi
+    if [[ -n ${GOROOT-} ]]; then
+        root=$(_go_shell_path "$GOROOT") || return 2
+        for candidate in "$root/bin/go" "$root/bin/go.exe"; do
+            if [[ -f $candidate && -x $candidate ]]; then printf '%s\n' "$candidate"; return 0; fi
+        done
+        _go_err 'Configured GOROOT has no executable Go bootstrap'; return 2
+    fi
+    if [[ -f /usr/local/go/bin/go && -x /usr/local/go/bin/go ]]; then
+        printf '%s\n' /usr/local/go/bin/go; return 0
+    fi
+    return 1
+}
+_go_probe(){
+    if ! command -v env >/dev/null 2>&1; then _go_err 'Go bootstrap probes require the env utility'; return 1; fi
+    # An external process environment also respects readonly caller bindings.
+    command env GOTOOLCHAIN=local "$@"
+}
+_go_version(){
+    local value
+    if ! value=$(_go_probe "$1" version) || [[ -z $value ]]; then
+        _go_err "Unusable Go bootstrap: $1"; return 1
+    fi
+    printf '%s\n' "$value"
+}
+_go_user_bin(){
+    local g=$1 value
+    if ! value=$(_go_probe "$g" env GOBIN); then _go_err 'Cannot read effective Go GOBIN'; return 1; fi
+    if [[ -z $value ]]; then
+        if ! value=$(_go_probe "$g" env GOPATH); then _go_err 'Cannot read effective Go GOPATH'; return 1; fi
+        if _go_native_path "$value"; then value=${value%%;*}; else value=${value%%:*}; fi
+        [[ -n $value ]] || { _go_err 'Go reported no effective GOPATH'; return 1; }
+        value=${value%[/\\]}/bin
+    fi
+    _go_shell_path "$value"
+}
+go_setup(){
+    local g version status
+    if g=$(_go_cmd); then :; else
+        status=$?; ((status==1)) || return 1
+        _go_info 'Go is not installed; activation will safely skip.'; return 0
+    fi
+    version=$(_go_version "$g") || return 1
+    _go_ok "Go bootstrap: $g ($version)"
+}
+go_activate(){
+    local g b version status binding
+    for binding in PATH BASHCMDR_GO_ADDED_PATHS BASHCMDR_GO_LOADED; do _go_mutable "$binding" || return 1; done
+    # An exported loaded marker is not evidence that this child still has the
+    # parent's PATH or a usable bootstrap. Revalidate before changing context.
+    unset BASHCMDR_GO_LOADED
+    if g=$(_go_cmd); then :; else
+        status=$?; ((status==1)) || return 1
+        _go_info 'Go is not installed; skipping.'; return 0
+    fi
+    version=$(_go_version "$g") || return 1
+    b=$(_go_user_bin "$g") || return 1
+    _go_add "${g%/*}"
+    _go_add "$b"
+    # Ownership belongs to this shell, not to children inheriting PATH/marker.
+    export -n BASHCMDR_GO_ADDED_PATHS
+    export PATH BASHCMDR_GO_LOADED=1
+    _go_ok "Go activated: $g ($version)"
+}
+go_deactivate(){
+    local x binding
+    local -a added=()
+    for binding in PATH BASHCMDR_GO_ADDED_PATHS BASHCMDR_GO_LOADED; do _go_mutable "$binding" || return 1; done
+    IFS=: read -r -a added <<< "${BASHCMDR_GO_ADDED_PATHS-}"
+    for x in ${added[@]+"${added[@]}"}; do _go_remove "$x"; done
+    export PATH
+    unset BASHCMDR_GO_ADDED_PATHS BASHCMDR_GO_LOADED
+    _go_ok 'Go paths added by this cartridge were removed.'
+}
+go_toolchain_use(){
+    local v=${1-} g
+    [[ $v =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || { _go_err 'Usage: go_toolchain_use go1.N.P'; return 2; }
+    if ! g=$(_go_cmd); then _go_err 'Go is not available.'; return 1; fi
+    "$g" env -w "GOTOOLCHAIN=$v+auto"
+}
+go_diagnose(){
+    local g version status
+    if g=$(_go_cmd); then :; else
+        status=$?; ((status==1)) || return 1
+        printf '%s\n' 'Go absent (safe)'; return 0
+    fi
+    version=$(_go_version "$g") || return 1
+    printf '%s\nBootstrap executable: %s\nShell GOTOOLCHAIN: %s\n' "$version" "$g" "${GOTOOLCHAIN-(unset; Go defaults/config apply)}"
+}
+go_help(){ cat <<'EOF'
+Go Loader: manages only current-shell PATH entries for an existing Go bootstrap.
+Usage: bash main.bashcmdr ACTION [ARGUMENT]
+Actions:
+  setup       Inspect the selected existing bootstrap; absent Go is dormant success.
+  activate    Add existing bootstrap/user-bin paths in this process; no installer.
+  deactivate  Remove only PATH entries owned by this shell's activation.
+  diagnose    Report bootstrap and shell GOTOOLCHAIN; failed probes return failure.
+  help        Show this usage and the distinction between shell and saved state.
+  toolchain-use goMAJOR.MINOR.PATCH
+              Write Go's saved GOTOOLCHAIN=<selector>+auto setting explicitly.
+
+Sourcing main.bashcmdr defines helpers; a sourced positional action is not dispatched.
+Call a defined helper (go_setup/go_activate/go_deactivate/go_diagnose/go_toolchain_use)
+explicitly when current-shell effects are wanted; executing a script affects its child.
+Ordinary probes use process-local GOTOOLCHAIN=local and never run go env -w.
+Explicit toolchain-use invokes Go's own configuration command; upstream Go rules
+can have toolchain/cache effects. Environment values can override the saved default.
+Undo the saved setting with: go env -u GOTOOLCHAIN
+This removes the setting rather than restoring an earlier custom value; deactivation
+only cleans owned shell PATH entries and does not undo Go's saved configuration.
+The cartridge does not edit .profile, .bash_profile, .bashrc, /usr/local/go, go.mod or go.work.
+EOF
+}
+cartridge_dispatch(){ case "${1:-help}" in setup) go_setup;; activate) go_activate;; deactivate) go_deactivate;; diagnose) go_diagnose;; toolchain-use) go_toolchain_use "${2-}";; help) go_help;; *) go_help; return 2;; esac; }
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    cartridge_dispatch "$@"
+fi

@@ -1,0 +1,51 @@
+{
+  "name": "go-loader",
+  "version": "1.0.0",
+  "description": "Idempotent Go toolchain PATH and Go-managed toolchain selection",
+  "author": "bashcmdr-team",
+  "license": "Apache-2.0",
+  "copyright": "Copyright 2026 Eric Milgram",
+  "repository": "https://github.com/bashcmdr/cartridge-go",
+  "execution": {
+    "mode": "SOURCE_ONLY",
+    "guard_variable": "BASHCMDR_GO_LOADED"
+  },
+  "requires": {
+    "bashcmdr": ">=1.0.0"
+  },
+  "provides": {
+    "commands": [
+      "go"
+    ],
+    "environment": [
+      "BASHCMDR_GO_LOADED"
+    ],
+    "functions": [
+      "go_setup",
+      "go_activate",
+      "go_deactivate",
+      "go_diagnose",
+      "go_help",
+      "go_toolchain_use"
+    ]
+  },
+  "dependencies": {
+    "external": {
+      "go": {
+        "binary": "go",
+        "required": false,
+        "description": "Existing Go bootstrap"
+      }
+    }
+  },
+  "testing": {
+    "test_script": "tests/ci.bash"
+  },
+  "lifecycle": {
+    "setup": "go_setup",
+    "activate": "go_activate",
+    "deactivate": "go_deactivate",
+    "diagnose": "go_diagnose",
+    "help": "go_help"
+  }
+}
