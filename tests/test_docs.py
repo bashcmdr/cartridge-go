@@ -173,9 +173,24 @@ sys.exit(subprocess.run([REAL, *args]).returncode)
         writes = [x['args'] for x in self.go_calls() if x['args'][1:2] in [['-w'], ['-u']]]
         self.assertEqual(writes, [['env','-w','GOTOOLCHAIN=go1.22.0+auto'], ['env','-u','GOTOOLCHAIN']])
 
+    def system_path_without_go(self):
+        # The example needs "no Go on PATH". Some hosts ship one in a default PATH
+        # directory (GitHub's ubuntu-24.04 image has /usr/bin/go), so mirror those
+        # directories without go/gofmt instead of trusting the host.
+        mirror = self.root / 'system path without go'; mirror.mkdir()
+        for directory in os.defpath.split(os.pathsep):
+            if not directory or not os.path.isdir(directory):
+                continue
+            for entry in os.scandir(directory):
+                if entry.name in ('go', 'gofmt') or os.path.lexists(mirror / entry.name):
+                    continue
+                (mirror / entry.name).symlink_to(entry.path)
+        return str(mirror)
+
     def test_configured_root_fallback_without_path_go(self):
         (self.tools / 'go').unlink()
-        text = self.blocks('Configured root')[0] + '\n' + self.install_and_boot()
+        self.env['PATH'] = str(self.tools) + os.pathsep + self.system_path_without_go()
+        text =self.blocks('Configured root')[0] + '\n' + self.install_and_boot()
         text += r'''
 [[ $GOROOT == "$HOME/custom go bootstrap" && $(type -P go) == "$GOROOT/bin/go" && $BASHCMDR_GO_LOADED == 1 ]] || exit 91
 go_deactivate || exit $?
